@@ -74,6 +74,22 @@ def _resolve_live_wallet_address(exchange_cfg) -> str | None:
         raise ValueError("Could not derive live wallet address from PRIVATE_KEY") from exc
 
 
+def _build_position_fetcher(exchange_cfg, exchange):
+    """Return an async callable the strategy can use as its position source.
+
+    Only Kalshi needs one today — it has no EVM wallet, so positions come from
+    the authenticated Kalshi API instead of a public data-api. For Polymarket
+    this returns ``None`` and the strategy falls back to its wallet-based path.
+    """
+    if exchange_cfg.venue != "kalshi" or not exchange_cfg.live_send_enabled:
+        return None
+
+    async def _fetch() -> list[dict]:
+        return await asyncio.to_thread(exchange.get_portfolio_positions)
+
+    return _fetch
+
+
 def _install_market_discovery(venue: str) -> None:
     """Swap the strategy's market-discovery function for non-Polymarket venues.
 
@@ -224,6 +240,8 @@ async def run():
                 except Exception as exc:
                     logger.warning("drawdown_hwm_seed_failed: %s", exc)
 
+        position_fetcher = _build_position_fetcher(exchange_cfg, exchange)
+
         feed_factories = {
             "strategy": lambda: nothing_happens.run(
                 exchange=exchange,
@@ -236,6 +254,7 @@ async def run():
                 control_state=nothing_happens_control,
                 recovery_coordinator=recovery,
                 wallet_address=strategy_wallet_address,
+                position_fetcher=position_fetcher,
             ),
         }
         if recovery is not None and exchange_cfg.live_send_enabled:

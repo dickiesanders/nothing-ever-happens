@@ -479,6 +479,45 @@ class KalshiExchangeClient:
             return 0.0
         return 0.0
 
+    def get_portfolio_positions(self) -> list[dict]:
+        """Fetch all open NO-long positions, shaped for the strategy's position sync.
+
+        The strategy consumes positions as Polymarket-style dicts via
+        ``_position_snapshot_from_api``; we emit the same field names so the
+        strategy stays venue-agnostic. Only NO-long positions are returned
+        (``position < 0`` on Kalshi's signed schema) because this bot only
+        trades NO.
+        """
+        if not self.api_key_id or self._private_key is None:
+            return []
+
+        out: list[dict] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                payload = self._request(
+                    "GET",
+                    f"{API_PREFIX}/portfolio/positions",
+                    params=params,
+                    auth=True,
+                )
+            except Exception as exc:
+                logger.warning("kalshi_positions_page_failed", extra={"error": str(exc)})
+                raise
+
+            raw_positions = payload.get("market_positions") or []
+            for pos in raw_positions:
+                mapped = _position_row_to_polymarket_shape(pos)
+                if mapped is not None:
+                    out.append(mapped)
+
+            cursor = payload.get("cursor") or None
+            if not cursor:
+                return out
+
     # --------------------------- parsers ---------------------------
 
     def _fetch_order_book(self, token_id: str) -> _KalshiOrderBook:
@@ -605,3 +644,38 @@ def _coerce_float(value: Any, *, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _position_row_to_polymarket_shape(pos: dict) -> dict | None:
+    """Project one Kalshi ``market_positions`` row onto the strategy's schema.
+
+    Returns ``None`` for non-NO-long positions so the strategy only sees the
+    rows it knows how to manage. ``market_exposure`` is Kalshi's cost basis for
+    the open lots in cents — dividing by the contract count gives avg price.
+    """
+    ticker = str(pos.get("ticker") or "")
+    if not ticker:
+        return None
+    position = _coerce_float(pos.get("position"), default=0.0)
+    if position >= 0:
+        return None  # Only NO-long (negative position) is tradable by this bot.
+
+    size = abs(position)
+    exposure_cents = _coerce_float(pos.get("market_exposure"), default=0.0)
+    avg_price = (exposure_cents / size / 100.0) if size > 0 else 0.0
+    realized_pnl_cents = _coerce_float(pos.get("realized_pnl"), default=0.0)
+    return {
+        "slug": ticker,
+        "outcome": "No",
+        "asset": ticker,
+        "conditionId": str(pos.get("event_ticker") or ""),
+        "size": size,
+        "avgPrice": avg_price,
+        "initialValue": exposure_cents / 100.0,
+        "curPrice": 0.0,
+        "currentValue": 0.0,
+        "cashPnl": realized_pnl_cents / 100.0,
+        "percentPnl": 0.0,
+        "title": "",
+        "endDate": "",
+    }

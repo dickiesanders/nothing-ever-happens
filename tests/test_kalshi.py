@@ -14,6 +14,7 @@ from bot.exchange.kalshi import (
     _estimate_contract_count,
     _no_best_bid_ask,
     _no_book_as_levels,
+    _position_row_to_polymarket_shape,
     _prob,
     _KalshiOrderBook,
 )
@@ -315,6 +316,75 @@ def test_check_order_readiness_requires_credentials() -> None:
     )
     assert readiness.ready is False
     assert "Authenticated" in readiness.reason
+
+
+def test_position_row_to_polymarket_shape_maps_no_long_position() -> None:
+    row = {
+        "ticker": "KXABC-25DEC31",
+        "position": -100,
+        "market_exposure": 3000,  # $30.00 cost basis for 100 NO contracts → $0.30 avg
+        "realized_pnl": -200,
+        "event_ticker": "KXABC",
+    }
+    mapped = _position_row_to_polymarket_shape(row)
+    assert mapped is not None
+    assert mapped["slug"] == "KXABC-25DEC31"
+    assert mapped["asset"] == "KXABC-25DEC31"
+    assert mapped["outcome"] == "No"
+    assert mapped["conditionId"] == "KXABC"
+    assert mapped["size"] == 100.0
+    assert mapped["avgPrice"] == pytest.approx(0.30)
+    assert mapped["initialValue"] == pytest.approx(30.00)
+    assert mapped["cashPnl"] == pytest.approx(-2.00)
+
+
+def test_position_row_to_polymarket_shape_drops_yes_long_and_empty() -> None:
+    assert _position_row_to_polymarket_shape({"ticker": "KXABC", "position": 50}) is None
+    assert _position_row_to_polymarket_shape({"ticker": "KXABC", "position": 0}) is None
+    assert _position_row_to_polymarket_shape({"ticker": "", "position": -50}) is None
+
+
+def test_get_portfolio_positions_paginates_and_filters() -> None:
+    session = _FakeSession()
+    responses = iter(
+        [
+            _Response(
+                {
+                    "market_positions": [
+                        {"ticker": "KXA", "position": -10, "market_exposure": 300},
+                        {"ticker": "KXB", "position": 5, "market_exposure": 150},  # YES-long, drop
+                    ],
+                    "cursor": "page2",
+                }
+            ),
+            _Response(
+                {
+                    "market_positions": [
+                        {"ticker": "KXC", "position": -2, "market_exposure": 60},
+                    ],
+                    "cursor": None,
+                }
+            ),
+        ]
+    )
+
+    def _request(method, url, params=None, data=None, headers=None, timeout=None):
+        session.calls.append({"method": method, "url": url, "params": params})
+        return next(responses)
+
+    session.request = _request  # type: ignore[assignment]
+    client = KalshiExchangeClient(_live_config(), allow_trading=True, session=session)
+
+    positions = client.get_portfolio_positions()
+
+    assert [p["slug"] for p in positions] == ["KXA", "KXC"]
+    assert session.calls[0]["params"] == {"limit": 100}
+    assert session.calls[1]["params"] == {"limit": 100, "cursor": "page2"}
+
+
+def test_get_portfolio_positions_returns_empty_without_credentials() -> None:
+    client = KalshiExchangeClient(_paper_config(), allow_trading=False, session=_FakeSession())
+    assert client.get_portfolio_positions() == []
 
 
 def test_signing_produces_stable_headers_per_call() -> None:

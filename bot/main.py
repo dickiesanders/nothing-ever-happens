@@ -44,15 +44,22 @@ def _validate_live_runtime(exchange_cfg, database_url: str | None) -> None:
 
 
 def _build_exchange(exchange_cfg):
-    if exchange_cfg.live_send_enabled:
-        from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
+    if not exchange_cfg.live_send_enabled:
+        return PaperExchangeClient()
+    if exchange_cfg.venue == "kalshi":
+        from bot.exchange.kalshi import KalshiExchangeClient
 
-        return PolymarketClobExchangeClient(exchange_cfg, allow_trading=True)
-    return PaperExchangeClient()
+        return KalshiExchangeClient(exchange_cfg, allow_trading=True)
+    from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
+
+    return PolymarketClobExchangeClient(exchange_cfg, allow_trading=True)
 
 
 def _resolve_live_wallet_address(exchange_cfg) -> str | None:
     if not exchange_cfg.live_send_enabled:
+        return None
+    if exchange_cfg.venue == "kalshi":
+        # Kalshi has no on-chain wallet; positions come from the authenticated API.
         return None
     if exchange_cfg.signature_type in {1, 2}:
         return exchange_cfg.funder_address
@@ -65,6 +72,35 @@ def _resolve_live_wallet_address(exchange_cfg) -> str | None:
         return str(Account.from_key(exchange_cfg.private_key).address)
     except Exception as exc:
         raise ValueError("Could not derive live wallet address from PRIVATE_KEY") from exc
+
+
+def _build_position_fetcher(exchange_cfg, exchange):
+    """Return an async callable the strategy can use as its position source.
+
+    Only Kalshi needs one today — it has no EVM wallet, so positions come from
+    the authenticated Kalshi API instead of a public data-api. For Polymarket
+    this returns ``None`` and the strategy falls back to its wallet-based path.
+    """
+    if exchange_cfg.venue != "kalshi" or not exchange_cfg.live_send_enabled:
+        return None
+
+    async def _fetch() -> list[dict]:
+        return await asyncio.to_thread(exchange.get_portfolio_positions)
+
+    return _fetch
+
+
+def _install_market_discovery(venue: str) -> None:
+    """Swap the strategy's market-discovery function for non-Polymarket venues.
+
+    The strategy module imports ``fetch_candidate_markets`` at module load; we
+    rebind that attribute here so the rest of the strategy code stays venue-agnostic.
+    """
+    if venue == "kalshi":
+        from bot import kalshi_markets
+        from bot.strategy import nothing_happens as strategy_module
+
+        strategy_module.fetch_candidate_markets = kalshi_markets.fetch_candidate_markets
 
 
 def _patch_clob_http_timeout() -> None:
@@ -84,9 +120,11 @@ def _patch_clob_http_timeout() -> None:
 async def run():
     load_dotenv()
     configure_logging(os.getenv("LOG_LEVEL", "INFO"))
-    _patch_clob_http_timeout()
 
     exchange_cfg, strategy_cfg = load_nothing_happens_config()
+    if exchange_cfg.venue == "polymarket":
+        _patch_clob_http_timeout()
+    _install_market_discovery(exchange_cfg.venue)
     strategy_wallet_address = _resolve_live_wallet_address(exchange_cfg)
 
     database_url = os.getenv("DATABASE_URL")
@@ -101,6 +139,7 @@ async def run():
         "bot_starting",
         extra={
             "runtime": "nothing_happens",
+            "venue": exchange_cfg.venue,
             "host": exchange_cfg.host,
             "chain_id": exchange_cfg.chain_id,
             "signature_type": exchange_cfg.signature_type,
@@ -136,7 +175,8 @@ async def run():
     redeemer = None
     rpc_url = (os.getenv("POLYGON_RPC_URL") or "").strip()
     if (
-        exchange_cfg.live_send_enabled
+        exchange_cfg.venue == "polymarket"
+        and exchange_cfg.live_send_enabled
         and exchange_cfg.private_key
         and exchange_cfg.signature_type == 2
         and exchange_cfg.funder_address
@@ -200,6 +240,8 @@ async def run():
                 except Exception as exc:
                     logger.warning("drawdown_hwm_seed_failed: %s", exc)
 
+        position_fetcher = _build_position_fetcher(exchange_cfg, exchange)
+
         feed_factories = {
             "strategy": lambda: nothing_happens.run(
                 exchange=exchange,
@@ -212,6 +254,7 @@ async def run():
                 control_state=nothing_happens_control,
                 recovery_coordinator=recovery,
                 wallet_address=strategy_wallet_address,
+                position_fetcher=position_fetcher,
             ),
         }
         if recovery is not None and exchange_cfg.live_send_enabled:

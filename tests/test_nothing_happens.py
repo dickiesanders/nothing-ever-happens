@@ -177,6 +177,7 @@ def _make_runtime(
     cfg: NothingHappensConfig | None = None,
     control_state: NothingHappensControlState | None = None,
     recovery_coordinator=None,
+    position_fetcher=None,
 ) -> NothingHappensRuntime:
     return NothingHappensRuntime(
         exchange=exchange or StubExchange(),
@@ -191,6 +192,7 @@ def _make_runtime(
         control_state=control_state,
         recovery_coordinator=recovery_coordinator,
         wallet_address=wallet_address,
+        position_fetcher=position_fetcher,
     )
 
 
@@ -349,6 +351,55 @@ async def test_run_price_cycle_waits_for_initial_remote_position_sync() -> None:
 
     await runtime._run_price_cycle()
 
+    runtime._evaluate_market.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_positions_uses_position_fetcher_when_provided() -> None:
+    captured_positions = [
+        {
+            "slug": "fetched-market",
+            "outcome": "No",
+            "asset": "KXFETCHED",
+            "conditionId": "cond",
+            "size": 12.0,
+            "avgPrice": 0.4,
+            "initialValue": 4.8,
+        }
+    ]
+
+    fetcher = AsyncMock(return_value=captured_positions)
+    runtime = _make_runtime(position_fetcher=fetcher)
+    market = _make_market(slug="fetched-market")
+    runtime._markets_by_slug[market.slug] = market
+
+    # Even if the legacy wallet-based fetcher would succeed, the injected
+    # fetcher must take precedence.
+    with patch(
+        "bot.strategy.nothing_happens._fetch_open_positions",
+        new=AsyncMock(return_value=[{"slug": "should-not-appear"}]),
+    ) as legacy_fetcher:
+        await runtime._sync_positions()
+
+    fetcher.assert_awaited_once()
+    legacy_fetcher.assert_not_awaited()
+    assert "fetched-market" in runtime._positions_by_slug
+    assert "should-not-appear" not in runtime._positions_by_slug
+    assert runtime._remote_positions_ready is True
+
+
+@pytest.mark.asyncio
+async def test_run_price_cycle_waits_for_position_fetcher_first_sync() -> None:
+    """A runtime with only a position_fetcher must also block price cycles
+    until the first sync completes, mirroring the wallet_address gate."""
+    fetcher = AsyncMock(return_value=[])
+    runtime = _make_runtime(position_fetcher=fetcher)
+    market = _make_market(slug="wait-for-kalshi-sync")
+    runtime._markets_by_slug[market.slug] = market
+    runtime._cash_balance = 100.0
+    runtime._evaluate_market = AsyncMock()
+
+    await runtime._run_price_cycle()
     runtime._evaluate_market.assert_not_awaited()
 
 

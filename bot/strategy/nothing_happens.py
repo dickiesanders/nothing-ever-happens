@@ -258,6 +258,7 @@ class NothingHappensRuntime:
         control_state: NothingHappensControlState | None,
         recovery_coordinator=None,
         wallet_address: str | None,
+        position_fetcher=None,
     ) -> None:
         self.exchange = exchange
         self.session = session
@@ -269,6 +270,9 @@ class NothingHappensRuntime:
         self.control_state = control_state
         self.recovery_coordinator = recovery_coordinator
         self.wallet_address = wallet_address
+        # When set, takes precedence over the wallet-based Polymarket fetcher.
+        # Signature: ``async () -> list[dict]`` returning Polymarket-shaped rows.
+        self.position_fetcher = position_fetcher
 
         self._markets_by_slug: dict[str, StandaloneMarket] = {}
         self._positions_by_slug: dict[str, PositionSnapshot] = {}
@@ -283,7 +287,7 @@ class NothingHappensRuntime:
         self._last_position_sync_ts: float = 0.0
         self._last_price_cycle_ts: float = 0.0
         self._last_error: str = ""
-        self._remote_positions_ready: bool = wallet_address is None
+        self._remote_positions_ready: bool = not self._has_remote_positions()
         self._opened_position_count: int = 0
         self._target_open_positions: int | None = None
         self._auto_target_baseline_open_positions: int = 0
@@ -478,10 +482,21 @@ class NothingHappensRuntime:
         )
         self._publish_portfolio()
 
+    def _has_remote_positions(self) -> bool:
+        return bool(self.wallet_address) or self.position_fetcher is not None
+
     async def _sync_positions(self) -> None:
         now_ts = time.time()
         fetched_positions: list[dict] | None = []
-        if self.wallet_address:
+        if self.position_fetcher is not None:
+            try:
+                fetched_positions = await self.position_fetcher()
+                self._remote_positions_ready = True
+            except Exception as exc:
+                fetched_positions = None
+                self._last_error = f"positions_fetch_failed: {exc}"
+                logger.warning("nothing_happens_positions_fetch_failed: %s", exc)
+        elif self.wallet_address:
             try:
                 fetched_positions = await _fetch_open_positions(self.session, self.wallet_address)
                 self._remote_positions_ready = True
@@ -509,7 +524,7 @@ class NothingHappensRuntime:
                 if slug in positions_by_slug:
                     self._local_positions.pop(slug, None)
                     continue
-                if self.wallet_address and (now_ts - overlay.created_at_ts) > POSITION_GRACE_SEC:
+                if self._has_remote_positions() and (now_ts - overlay.created_at_ts) > POSITION_GRACE_SEC:
                     self._local_positions.pop(slug, None)
                     continue
                 positions_by_slug[slug] = _position_snapshot_from_local(overlay)
@@ -554,7 +569,7 @@ class NothingHappensRuntime:
     async def _run_price_cycle(self) -> None:
         if not self._markets_by_slug:
             return
-        if self.wallet_address and not self._remote_positions_ready:
+        if self._has_remote_positions() and not self._remote_positions_ready:
             logger.info("nothing_happens_waiting_for_initial_position_sync")
             return
         if self._remaining_queue_capacity() == 0:
@@ -1436,6 +1451,7 @@ async def run(
     control_state: NothingHappensControlState | None,
     recovery_coordinator=None,
     wallet_address: str | None,
+    position_fetcher=None,
 ) -> None:
     runtime = NothingHappensRuntime(
         exchange=exchange,
@@ -1448,5 +1464,6 @@ async def run(
         control_state=control_state,
         recovery_coordinator=recovery_coordinator,
         wallet_address=wallet_address,
+        position_fetcher=position_fetcher,
     )
     await runtime.run()

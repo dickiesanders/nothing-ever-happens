@@ -1,6 +1,7 @@
-# Nothing Ever Happens Polymarket Bot
+# Nothing Ever Happens Bot
 
-Focused async Python bot for Polymarket that buys No on standalone non-sports yes/no markets.
+Focused async Python bot that buys No on standalone non-sports yes/no markets.
+Ships with adapters for **Polymarket** (default) and **Kalshi**; pick one via `connection.venue` in `config.json`.
 
 *FOR ENTERTAINMENT ONLY. PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. USE AT YOUR OWN RISK. THE AUTHORS ARE NOT LIABLE FOR ANY CLAIMS, LOSSES, OR DAMAGES.*
 
@@ -26,18 +27,29 @@ Real order transmission requires all three environment variables:
 
 If any of those are missing, the bot uses `PaperExchangeClient`.
 
-Additional live-mode requirements:
+Additional live-mode requirements (Polymarket, `venue=polymarket`):
 
 - `PRIVATE_KEY`
 - `FUNDER_ADDRESS` for signature types `1` and `2`
 - `DATABASE_URL`
 - `POLYGON_RPC_URL` for proxy-wallet approvals and redemption
 
+Additional live-mode requirements (Kalshi, `venue=kalshi`):
+
+- `KALSHI_API_KEY_ID`
+- `KALSHI_PRIVATE_KEY_PATH` (or `KALSHI_PRIVATE_KEY_PEM` inline)
+- `DATABASE_URL`
+
+Kalshi is off-chain/custodial, so there is no RPC URL, funder address,
+redeemer, or proxy-wallet approval step.
+
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-cp config.example.json config.json
+cp config.example.json config.json         # Polymarket
+# or
+cp config.kalshi.example.json config.json  # Kalshi
 cp .env.example .env
 ```
 

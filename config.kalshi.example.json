@@ -1,9 +1,7 @@
 {
   "connection": {
-    "venue": "polymarket",
-    "host": "https://clob.polymarket.com",
-    "chain_id": 137,
-    "signature_type": 2
+    "venue": "kalshi",
+    "host": "https://api.elections.kalshi.com"
   },
   "strategies": {
     "nothing_happens": {

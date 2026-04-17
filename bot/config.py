@@ -73,6 +73,9 @@ def _get_nothing_happens_section(cfg: dict[str, Any]) -> dict[str, Any]:
     return strategy_cfg
 
 
+SUPPORTED_VENUES = {"polymarket", "kalshi"}
+
+
 @dataclass(frozen=True)
 class ExchangeConfig:
     host: str
@@ -81,8 +84,21 @@ class ExchangeConfig:
     private_key: str | None
     funder_address: str | None
     live_send_enabled: bool = False
+    venue: str = "polymarket"
+    kalshi_api_key_id: str | None = None
+    kalshi_private_key_pem: str | None = None
 
     def validate(self) -> None:
+        if self.venue not in SUPPORTED_VENUES:
+            raise ValueError(
+                f"connection.venue must be one of {sorted(SUPPORTED_VENUES)}, got {self.venue!r}"
+            )
+        if self.venue == "polymarket":
+            self._validate_polymarket()
+        elif self.venue == "kalshi":
+            self._validate_kalshi()
+
+    def _validate_polymarket(self) -> None:
         if self.signature_type not in {0, 1, 2}:
             raise ValueError(
                 f"connection.signature_type must be 0, 1, or 2, got {self.signature_type}"
@@ -102,15 +118,51 @@ class ExchangeConfig:
                 f"{self.signature_type} (proxy/delegated wallet)"
             )
 
+    def _validate_kalshi(self) -> None:
+        if not self.live_send_enabled:
+            return
+        if not self.kalshi_api_key_id:
+            raise ValueError(
+                "KALSHI_API_KEY_ID is required when live order transmission is enabled for Kalshi"
+            )
+        if not self.kalshi_private_key_pem:
+            raise ValueError(
+                "KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_PEM) is required when "
+                "live order transmission is enabled for Kalshi"
+            )
+
+
+def _load_kalshi_private_key_pem() -> str | None:
+    inline = _env_optional("KALSHI_PRIVATE_KEY_PEM")
+    if inline:
+        return inline
+    path = _env_optional("KALSHI_PRIVATE_KEY_PATH")
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Kalshi private key file not found: {path}")
+    return p.read_text()
+
+
+def _default_host_for_venue(venue: str) -> str:
+    if venue == "kalshi":
+        return "https://api.elections.kalshi.com"
+    return "https://clob.polymarket.com"
+
 
 def _build_exchange_config(conn: dict[str, Any]) -> ExchangeConfig:
+    venue = str(conn.get("venue", "polymarket")).strip().lower() or "polymarket"
     exchange = ExchangeConfig(
-        host=str(conn.get("host", "https://clob.polymarket.com")),
+        host=str(conn.get("host", _default_host_for_venue(venue))),
         chain_id=int(conn.get("chain_id", 137)),
         signature_type=int(conn.get("signature_type", 2)),
         private_key=_env_optional("PRIVATE_KEY"),
         funder_address=_env_optional("FUNDER_ADDRESS"),
         live_send_enabled=_compute_live_send_enabled(),
+        venue=venue,
+        kalshi_api_key_id=_env_optional("KALSHI_API_KEY_ID"),
+        kalshi_private_key_pem=_load_kalshi_private_key_pem(),
     )
     exchange.validate()
     return exchange

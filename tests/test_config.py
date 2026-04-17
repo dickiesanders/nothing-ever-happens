@@ -139,3 +139,31 @@ def test_load_nothing_happens_config_requires_funder_for_proxy_wallets(
     monkeypatch.setenv("PRIVATE_KEY", "0xabc")
     with pytest.raises(ValueError, match="FUNDER_ADDRESS"):
         load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_rejects_unknown_venue(tmp_path, monkeypatch) -> None:
+    payload = _base_config(connection={"venue": "betfair"})
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    with pytest.raises(ValueError, match="venue"):
+        load_nothing_happens_config()
+
+
+def test_load_nothing_happens_config_kalshi_paper_mode_ok(tmp_path, monkeypatch) -> None:
+    payload = _base_config(connection={"venue": "kalshi", "host": "https://api.elections.kalshi.com"})
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    exchange, _ = load_nothing_happens_config()
+    assert exchange.venue == "kalshi"
+    assert exchange.host == "https://api.elections.kalshi.com"
+
+
+def test_load_nothing_happens_config_kalshi_live_requires_api_key(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    payload = _base_config(connection={"venue": "kalshi"})
+    monkeypatch.setenv("CONFIG_PATH", _write_config(tmp_path, payload))
+    monkeypatch.setenv("BOT_MODE", "live")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("DRY_RUN", "false")
+    with pytest.raises(ValueError, match="KALSHI_API_KEY_ID"):
+        load_nothing_happens_config()

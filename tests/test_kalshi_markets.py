@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from bot.kalshi_markets import (
+    _parse_retry_after_seconds,
     _passes_filters,
+    _window_cutoff_ts,
     build_standalone_market,
     fetch_candidate_markets,
 )
@@ -94,6 +96,47 @@ def test_build_standalone_market_returns_none_without_ticker() -> None:
     assert build_standalone_market({"ticker": ""}) is None
 
 
+def test_parse_retry_after_seconds_handles_integer_header() -> None:
+    class _Headers:
+        def get(self, key):
+            assert key == "Retry-After"
+            return "7"
+
+    assert _parse_retry_after_seconds(_Headers()) == 7.0
+
+
+def test_parse_retry_after_seconds_returns_none_for_missing() -> None:
+    assert _parse_retry_after_seconds(None) is None
+    assert _parse_retry_after_seconds({}) is None
+    assert _parse_retry_after_seconds({"Retry-After": "not-a-number"}) is None
+
+
+def test_window_cutoff_ts_rounds_to_months_ahead() -> None:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    cutoff = _window_cutoff_ts(3)
+    assert cutoff is not None
+    # Cutoff should be ~90 days ahead (3 months * 30 days).
+    assert cutoff - now_ts == pytest.approx(90 * 24 * 3600, rel=0.01)
+    assert _window_cutoff_ts(0) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_candidate_markets_passes_max_close_ts_to_iterator() -> None:
+    session = object()
+    seen: dict = {}
+
+    async def _async_gen(_sess, base_url=None, max_close_ts=None):
+        seen["max_close_ts"] = max_close_ts
+        return
+        yield  # make this an async generator
+
+    with patch("bot.kalshi_markets._iter_market_batches", _async_gen):
+        await fetch_candidate_markets(session, max_end_date_months=3)
+
+    assert seen["max_close_ts"] is not None
+    assert seen["max_close_ts"] > datetime.now(timezone.utc).timestamp()
+
+
 @pytest.mark.asyncio
 async def test_fetch_candidate_markets_paginates_and_filters() -> None:
     session = object()
@@ -112,7 +155,7 @@ async def test_fetch_candidate_markets_paginates_and_filters() -> None:
     }
     batches = [page_one["markets"], page_two["markets"]]
 
-    async def _async_gen(_sess, base_url=None):
+    async def _async_gen(_sess, base_url=None, max_close_ts=None):
         for batch in batches:
             yield batch
 

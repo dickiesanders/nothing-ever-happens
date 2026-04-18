@@ -25,11 +25,11 @@ from bot.standalone_markets import (
 logger = logging.getLogger(__name__)
 
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-PAGE_LIMIT = 200
+PAGE_LIMIT = 100
 PAGE_MAX_RETRIES = 5
-PAGE_RETRY_BASE_DELAY_SEC = 1.0
-PAGE_RETRY_MAX_DELAY_SEC = 20.0
-PAGE_DELAY_SEC = 0.1
+PAGE_RETRY_BASE_DELAY_SEC = 2.0
+PAGE_RETRY_MAX_DELAY_SEC = 30.0
+PAGE_DELAY_SEC = 0.25
 
 # Kalshi exposes a ``category`` field on markets; we drop sports-heavy
 # categories entirely rather than keyword-matching every ticker.
@@ -159,11 +159,34 @@ def _midpoint(bid: float, ask: float) -> float:
     return bid or ask or 0.0
 
 
-async def _iter_market_batches(session: aiohttp.ClientSession, *, base_url: str):
+def _parse_retry_after_seconds(headers) -> float | None:
+    """Read a Retry-After header (Kalshi sends seconds as an integer)."""
+    if not headers:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except AttributeError:
+        raw = None
+    if raw is None:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _iter_market_batches(
+    session: aiohttp.ClientSession,
+    *,
+    base_url: str,
+    max_close_ts: int | None = None,
+):
     cursor: str | None = None
     retries = 0
     while True:
         params: dict[str, str] = {"limit": str(PAGE_LIMIT), "status": "open"}
+        if max_close_ts is not None:
+            params["max_close_ts"] = str(max_close_ts)
         if cursor:
             params["cursor"] = cursor
         try:
@@ -176,16 +199,22 @@ async def _iter_market_batches(session: aiohttp.ClientSession, *, base_url: str)
                 payload = await resp.json()
         except aiohttp.ClientResponseError as exc:
             if exc.status in {429, 502, 503, 504} and retries < PAGE_MAX_RETRIES:
-                delay = min(
-                    PAGE_RETRY_BASE_DELAY_SEC * (2 ** retries),
-                    PAGE_RETRY_MAX_DELAY_SEC,
+                retry_after = _parse_retry_after_seconds(exc.headers)
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else min(
+                        PAGE_RETRY_BASE_DELAY_SEC * (2 ** retries),
+                        PAGE_RETRY_MAX_DELAY_SEC,
+                    )
                 )
                 retries += 1
                 logger.warning(
-                    "kalshi_markets_rate_limited cursor=%s retry=%d delay=%.2f",
+                    "kalshi_markets_rate_limited cursor=%s retry=%d delay=%.2f retry_after=%s",
                     cursor,
                     retries,
                     delay,
+                    retry_after,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -217,8 +246,11 @@ async def fetch_candidate_markets(
 ) -> list[StandaloneMarket]:
     """Stream Kalshi ``open`` markets and project them as ``StandaloneMarket`` rows."""
 
+    max_close_ts = _window_cutoff_ts(max_end_date_months)
     kept: list[StandaloneMarket] = []
-    async for batch in _iter_market_batches(session, base_url=base_url):
+    async for batch in _iter_market_batches(
+        session, base_url=base_url, max_close_ts=max_close_ts
+    ):
         for raw in batch:
             if not _passes_filters(raw, max_end_date_months=max_end_date_months):
                 continue
@@ -236,3 +268,11 @@ async def fetch_all_open_markets(session: aiohttp.ClientSession) -> list[dict]:
     async for batch in _iter_market_batches(session, base_url=KALSHI_API_BASE):
         out.extend(batch)
     return out
+
+
+def _window_cutoff_ts(max_end_date_months: int) -> int | None:
+    """Unix-second cutoff for server-side filtering via ``max_close_ts``."""
+    if max_end_date_months <= 0:
+        return None
+    cutoff = datetime.now(timezone.utc) + timedelta(days=max_end_date_months * 30)
+    return int(cutoff.timestamp())

@@ -90,17 +90,26 @@ def _build_position_fetcher(exchange_cfg, exchange):
     return _fetch
 
 
-def _install_market_discovery(venue: str) -> None:
+def _install_market_discovery(exchange_cfg) -> None:
     """Swap the strategy's market-discovery function for non-Polymarket venues.
 
     The strategy module imports ``fetch_candidate_markets`` at module load; we
     rebind that attribute here so the rest of the strategy code stays venue-agnostic.
+    For Kalshi we also bind the configured host so demo/prod switches cleanly.
     """
-    if venue == "kalshi":
-        from bot import kalshi_markets
-        from bot.strategy import nothing_happens as strategy_module
+    if exchange_cfg.venue != "kalshi":
+        return
 
-        strategy_module.fetch_candidate_markets = kalshi_markets.fetch_candidate_markets
+    from bot import kalshi_markets
+    from bot.strategy import nothing_happens as strategy_module
+
+    host = (exchange_cfg.host or "https://api.elections.kalshi.com").rstrip("/")
+    api_base = f"{host}/trade-api/v2"
+
+    async def _fetch(session):
+        return await kalshi_markets.fetch_candidate_markets(session, base_url=api_base)
+
+    strategy_module.fetch_candidate_markets = _fetch
 
 
 def _patch_clob_http_timeout() -> None:
@@ -124,7 +133,7 @@ async def run():
     exchange_cfg, strategy_cfg = load_nothing_happens_config()
     if exchange_cfg.venue == "polymarket":
         _patch_clob_http_timeout()
-    _install_market_discovery(exchange_cfg.venue)
+    _install_market_discovery(exchange_cfg)
     strategy_wallet_address = _resolve_live_wallet_address(exchange_cfg)
 
     database_url = os.getenv("DATABASE_URL")

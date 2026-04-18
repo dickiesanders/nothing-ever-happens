@@ -1,7 +1,7 @@
 {
   "connection": {
     "venue": "kalshi",
-    "host": "https://api.elections.kalshi.com"
+    "host": "https://demo-api.kalshi.co"
   },
   "strategies": {
     "nothing_happens": {

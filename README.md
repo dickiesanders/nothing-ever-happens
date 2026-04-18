@@ -43,6 +43,14 @@ Additional live-mode requirements (Kalshi, `venue=kalshi`):
 Kalshi is off-chain/custodial, so there is no RPC URL, funder address,
 redeemer, or proxy-wallet approval step.
 
+Set `connection.host` to pick demo vs production:
+
+- Demo: `https://demo-api.kalshi.co` (mock funds, get API keys at demo.kalshi.co)
+- Production: `https://api.elections.kalshi.com`
+
+Demo and production credentials are separate — generate a demo key in the
+demo UI before running live mode against demo.
+
 ## Setup
 
 ```bash
@@ -110,8 +118,9 @@ python -m pytest -q
 | --- | --- |
 | `scripts/db_stats.py` | Inspect live database table counts and recent activity |
 | `scripts/export_db.py` | Export live tables from `DATABASE_URL` or a Heroku app |
-| `scripts/wallet_history.py` | Pull positions, trades, and balances for the configured wallet |
+| `scripts/wallet_history.py` | Pull positions, trades, and balances for the configured wallet (Polymarket) |
 | `scripts/parse_logs.py` | Convert Heroku JSON logs into readable terminal or HTML output |
+| `scripts/kalshi_balance.py` | Print Kalshi cash balance (`--host demo` by default, or `prod` / full URL) |
 
 ## Repository Hygiene
 
